@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Proximity-based LT & S Tag Extractor</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 20px;
+    }
+    table {
+      margin-top: 20px;
+      border-collapse: collapse;
+      width: 95%;
+    }
+    th, td {
+      border: 1px solid #444;
+      padding: 8px;
+      text-align: center;
+    }
+    #previewTable {
+      display: none;
+    }
+    button {
+      margin-right: 10px;
+      padding: 8px 14px;
+    }
+  </style>
+</head>
+<body>
+  <h2>LT Tags specs</h2>
+  <input type="file" id="pdfFile" accept=".pdf" />
+  <button onclick="processPDF()">Extract Tags</button>
+  <button onclick="downloadExcel()">Download Excel</button>
+  <p id="status"></p>
+
+  <table id="previewTable">
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Page Number</th>
+        <th>LT Tag</th>
+        <th>S Tag</th>
+        <th>Label</th>
+        <th>EX Text</th>
+      </tr>
+    </thead>
+    <tbody id="tableBody"></tbody>
+  </table>
+
+  <script>
+    let extractedData = [["#", "Page Number", "LT Tag", "S Tag", "Label", "EX Text"]];
+
+    // Helper: check if two items are close enough horizontally and vertically
+    function isClose(item1, item2, xThresh = 50, yThresh = 15) {
+      // Coordinates (PDF origin bottom-left)
+      const dx = Math.abs(item1.x - item2.x);
+      const dy = Math.abs(item1.y - item2.y);
+      return dx <= xThresh && dy <= yThresh;
+    }
+
+    async function processPDF() {
+      const fileInput = document.getElementById("pdfFile");
+      const status = document.getElementById("status");
+      const table = document.getElementById("previewTable");
+      const tableBody = document.getElementById("tableBody");
+
+      if (!fileInput.files.length) {
+        alert("Please upload a PDF file.");
+        return;
+      }
+
+      const file = fileInput.files[0];
+      const fileReader = new FileReader();
+
+      fileReader.onload = async function () {
+        const typedArray = new Uint8Array(this.result);
+        const pdf = await pdfjsLib.getDocument({ data: typedArray }).promise;
+
+        extractedData = [["#", "Page Number", "LT Tag", "S Tag", "Label", "EX Text"]];
+        tableBody.innerHTML = "";
+
+        for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+          const page = await pdf.getPage(pageNum);
+          const content = await page.getTextContent();
+
+          // Extract items with position info
+          // item.transform = [a,b,c,d,e,f], where e=translateX, f=translateY
+          // We'll use e,f as x,y coordinates
+          const items = content.items.map(item => ({
+            str: item.str.trim(),
+            x: item.transform[4],
+            y: item.transform[5],
+          })).filter(i => i.str.length > 0);
+
+          // Sort by vertical (descending, because PDF origin bottom-left, higher y = higher on page)
+          // and then horizontal ascending
+          items.sort((a,b) => {
+            if (Math.abs(b.y - a.y) > 2) return b.y - a.y; 
+            return a.x - b.x;
+          });
+
+          // Group items by proximity
+          const groups = [];
+          for (const item of items) {
+            let foundGroup = false;
+            for (const group of groups) {
+              // check if this item is close to any item in the group
+              if (group.some(gItem => isClose(gItem, item))) {
+                group.push(item);
+                foundGroup = true;
+                break;
+              }
+            }
+            if (!foundGroup) {
+              groups.push([item]);
+            }
+          }
+
+          // For each group, try to find LT, S, B, EX tags
+          groups.forEach((group, index) => {
+            // Extract tag texts from group
+            const ltTag = group.find(i => /^LT-[\w-]+$/.test(i.str))?.str || "";
+            if (!ltTag) return; // skip groups without LT tag
+
+            const sTag = group.find(i => /^S[\dA-ZxX.-]+$/.test(i.str))?.str || "";
+            const label = group.find(i => /^[A-Z]$/.test(i.str))?.str || "";
+            const exText = group.find(i => /^EX[\w-]*/i.test(i.str))?.str || "";
+
+            const rowIndex = extractedData.length;
+            extractedData.push([rowIndex, pageNum, ltTag, sTag, label, exText]);
+
+            const row = document.createElement("tr");
+            row.innerHTML = `<td>${rowIndex}</td><td>${pageNum}</td><td>${ltTag}</td><td>${sTag}</td><td>${label}</td><td>${exText}</td>`;
+            tableBody.appendChild(row);
+          });
+        }
+
+        table.style.display = extractedData.length > 1 ? "table" : "none";
+        status.textContent = `Extracted ${extractedData.length - 1} LT tag(s) across ${pdf.numPages} page(s).`;
+      };
+
+      fileReader.readAsArrayBuffer(file);
+    }
+
+    function downloadExcel() {
+      if (extractedData.length <= 1) {
+        alert("No data to export. Please extract from PDF first.");
+        return;
+      }
+
+      const worksheet = XLSX.utils.aoa_to_sheet(extractedData);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Extracted Tags");
+
+      XLSX.writeFile(workbook, "LT_S_EX_tags_with_page.xlsx");
+    }
+  </script>
+</body>
+</html>
